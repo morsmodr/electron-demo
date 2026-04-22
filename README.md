@@ -16,8 +16,8 @@ Four logical units, three OS processes (preload shares the renderer process but 
 
 ```mermaid
 flowchart LR
-    Renderer["Renderer (Chromium)<br/>index.html + renderer.js"]
-    Preload["Preload isolated world<br/>contextBridge: window.api"]
+    Renderer["Renderer (Chromium, sandboxed)<br/>index.html + renderer.js"]
+    Preload["Preload isolated world (sandboxed)<br/>contextBridge: window.api"]
     Main["Main (Node + Electron)<br/>app lifecycle, BrowserWindow,<br/>ipcMain handlers"]
     Worker["Utility process (Node)<br/>worker.js -- simulated CAD call"]
 
@@ -28,6 +28,8 @@ flowchart LR
 ```
 
 Reliability goal: a slow or blocking native call in the worker must not freeze the UI **or** the main process. The main process forks the worker and brokers the initial `MessagePort` handoff — after that, renderer and worker talk directly over a `MessageChannel`.
+
+Security posture: the renderer and preload both run with Chromium's sandbox on (Electron's default — no `sandbox: false` override) and `contextIsolation` on. The preload only uses the sandbox-safe surface (`contextBridge`, `ipcRenderer`, and `@electron-toolkit/preload`'s allowlist), so any Node-level capability — spawning processes, touching the filesystem, loading a CAD SDK — is confined to the main process and the utility worker where it belongs. If the renderer is ever compromised, the blast radius stops at the IPC boundary.
 
 ### Classic request/response IPC (`Ping` / `Send IPC` buttons)
 

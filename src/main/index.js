@@ -13,8 +13,7 @@ function createWindow() {
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+      preload: join(__dirname, '../preload/index.js')
     }
   })
 
@@ -40,6 +39,15 @@ function createWindow() {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
+  // Keep dev's userData isolated from the installed build's so both can run
+  // side-by-side (otherwise Chromium's exclusive lock on the cache folder
+  // makes the second-to-start instance fail with "Unable to move the cache:
+  // Access is denied"). Must run before anything else touches disk —
+  // createWindow, autoUpdater, etc.
+  if (is.dev) {
+    app.setPath('userData', join(app.getPath('userData'), 'dev'))
+  }
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
