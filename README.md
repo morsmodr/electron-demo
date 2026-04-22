@@ -131,6 +131,18 @@ flowchart LR
 4. Serve `dist/` on port 8080, e.g. `npx http-server dist -p 8080`.
 5. Launch the previously installed app — it fetches `latest.yml`, downloads the new installer, verifies SHA512, and relaunches into the new version.
 
+### Code signing (known gap, intentional for POC)
+
+Builds produced by this repo are **unsigned**. On first launch the installer will trip Windows SmartScreen ("Windows protected your PC") and macOS Gatekeeper ("cannot be opened because the developer cannot be verified"). Users can still run it — on Windows via *More info → Run anyway*, on macOS via right-click → Open — but in a real enterprise rollout this is the first thing to fix.
+
+For production you would:
+
+- **Windows** — obtain an OV or EV code-signing certificate (DigiCert, SSL.com, Sectigo, or Azure Trusted Signing) and add `win.certificateFile` / `win.certificatePassword`, or `win.azureSignOptions`, to `electron-builder.yml`. `electron-builder` then invokes `signtool` during packaging and stamps both the installer and the app `.exe`.
+- **macOS** — join the Apple Developer Program ($99/yr), add `mac.identity` pointing at a "Developer ID Application" certificate, and enable notarization via `notarize: true` + `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` env vars. Notarization uploads the signed build to Apple, which staples a ticket Gatekeeper accepts offline.
+- **Linux** — generally not signed in the same sense; integrity is handled by distro package signatures (`deb`/`rpm`) or the AppImage `.zsync` + SHA512 already in `latest.yml`.
+
+The existing auto-update flow already verifies SHA512 against `latest.yml`, so it stays safe once signing is added — signing simply adds publisher-identity verification on top of the integrity check.
+
 ## Project layout
 
 ```
