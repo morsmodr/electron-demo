@@ -17,14 +17,14 @@ Four logical units, three OS processes (preload shares the renderer process but 
 ```mermaid
 flowchart LR
     Renderer["Renderer (Chromium)<br/>index.html + renderer.js"]
-    Preload["Preload (isolated world)<br/>contextBridge: window.api"]
+    Preload["Preload isolated world<br/>contextBridge: window.api"]
     Main["Main (Node + Electron)<br/>app lifecycle, BrowserWindow,<br/>ipcMain handlers"]
-    Worker["Utility process (Node)<br/>worker.js — simulated CAD call"]
+    Worker["Utility process (Node)<br/>worker.js -- simulated CAD call"]
 
     Renderer <-- "window.api.*" --> Preload
-    Preload <-- "ipcRenderer ⇄ ipcMain" --> Main
+    Preload <-- "ipcRenderer / ipcMain" --> Main
     Main -- "utilityProcess.fork + port2" --> Worker
-    Renderer <== "MessageChannel (port1 ⇄ port2)<br/>main not in data path" ==> Worker
+    Renderer <== "MessageChannel port1 / port2<br/>main not in data path" ==> Worker
 ```
 
 Reliability goal: a slow or blocking native call in the worker must not freeze the UI **or** the main process. The main process forks the worker and brokers the initial `MessagePort` handoff — after that, renderer and worker talk directly over a `MessageChannel`.
@@ -45,21 +45,21 @@ sequenceDiagram
     participant R as Renderer
     participant P as Preload
     participant M as Main
-    participant W as Utility (worker.js)
+    participant W as Utility worker.js
 
-    R->>R: addEventListener('message', handlePortArrival)
-    R->>P: window.api.openCadPort()
-    P->>M: ipcRenderer.invoke('cad:openPort')
-    M->>W: utilityProcess.fork(worker.js)
-    M->>M: new MessageChannelMain() → {port1, port2}
-    M->>W: child.postMessage({type:'init'}, [port2])
-    M->>P: event.sender.postMessage('cad:port', null, [port1])
+    R->>R: addEventListener 'message' handlePortArrival
+    R->>P: window.api.openCadPort
+    P->>M: ipcRenderer.invoke 'cad:openPort'
+    M->>W: utilityProcess.fork worker.js
+    M->>M: new MessageChannelMain -- port1 and port2
+    M->>W: child.postMessage init, transfer port2
+    M->>P: webContents.postMessage 'cad:port', transfer port1
     M-->>P: invoke resolves with true
-    P->>R: window.postMessage('cad:port', '*', [port1])
-    R->>R: port.start(); port.postMessage({type:'cadCall'})
+    P->>R: window.postMessage 'cad:port', transfer port1
+    R->>R: port.start then port.postMessage cadCall
     R->>W: via MessageChannel (direct)
     W->>W: simulate 500 ms work + 16 MiB buffer
-    W->>R: port.postMessage({type:'cadResult', buf}) (direct)
+    W->>R: port.postMessage cadResult (direct)
 ```
 
 Why the detours:
@@ -83,8 +83,8 @@ flowchart LR
     end
 
     subgraph BuildStep["Build"]
-        EV["electron-vite build<br/>→ out/{main,preload,renderer}"]
-        EB["electron-builder<br/>NSIS / dmg / AppImage+snap+deb"]
+        EV["electron-vite build<br/>outputs out/main, out/preload, out/renderer"]
+        EB["electron-builder<br/>NSIS, dmg, AppImage+snap+deb"]
     end
 
     subgraph Artifacts["dist/ artifacts"]
@@ -111,7 +111,7 @@ flowchart LR
     Host -- "version + sha512" --> App
     App -- "GET setup.exe if newer" --> Host
     Host -- "installer bytes" --> App
-    App -- "verify sha512 → quitAndInstall()" --> App
+    App -- "verify sha512 then quitAndInstall" --> App
 ```
 
 ### What's wired up
