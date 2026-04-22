@@ -1,6 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain, utilityProcess, MessageChannelMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { autoUpdater } from 'electron-updater'
 import icon from '../../resources/icon.png?asset'
 
 function createWindow() {
@@ -74,6 +75,22 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+
+  // electron-updater against a `generic` provider (see electron-builder.yml +
+  // dev-app-update.yml). Integrity is verified against the SHA512 in
+  // latest.yml, so unsigned builds still update correctly for a local POC.
+  autoUpdater.on('error', (e) => console.error('[updater] error', e))
+  autoUpdater.on('checking-for-update', () => console.log('[updater] checking'))
+  autoUpdater.on('update-available', (i) => console.log('[updater] available', i.version))
+  autoUpdater.on('update-not-available', (i) => console.log('[updater] not available', i.version))
+  autoUpdater.on('download-progress', (p) =>
+    console.log(`[updater] download ${Math.round(p.percent)}%`)
+  )
+  autoUpdater.on('update-downloaded', (i) => {
+    console.log('[updater] downloaded', i.version, '— relaunching')
+    autoUpdater.quitAndInstall()
+  })
+  autoUpdater.checkForUpdatesAndNotify()
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
