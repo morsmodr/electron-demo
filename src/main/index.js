@@ -50,7 +50,7 @@ app.whenReady().then(() => {
   })
 
   // IPC test
-  ipcMain.on('ping', () => console.log('pong'))
+  ipcMain.handle('ping', (_event, msg) => ({ reply: `main received: ${msg}`, at: Date.now() }))
 
   createWindow()
 

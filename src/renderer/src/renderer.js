@@ -10,9 +10,19 @@ function doAThing() {
   replaceText('.chrome-version', `Chromium v${versions.chrome}`)
   replaceText('.node-version', `Node v${versions.node}`)
 
+  const out = document.getElementById('pingOut')
+  const showReply = (result) => {
+    if (out) out.textContent = JSON.stringify(result, null, 2)
+  }
+
   const ipcHandlerBtn = document.getElementById('ipcHandler')
-  ipcHandlerBtn?.addEventListener('click', () => {
-    window.electron.ipcRenderer.send('ping')
+  ipcHandlerBtn?.addEventListener('click', async () => {
+    showReply(await window.api.ping('from Send IPC link'))
+  })
+
+  const pingBtn = document.getElementById('pingBtn')
+  pingBtn?.addEventListener('click', async () => {
+    showReply(await window.api.ping('from Ping button'))
   })
 }
 
