@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, utilityProcess, MessageChannelMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -49,8 +49,29 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // IPC test
+  // Classic request/response IPC: renderer -> preload api.ping -> ipcRenderer.invoke -> here.
   ipcMain.handle('ping', (_event, msg) => ({ reply: `main received: ${msg}`, at: Date.now() }))
+
+  // Out-of-process worker channel. Flow: fork a utilityProcess running worker.js,
+  // create a MessageChannelMain, hand port2 to the worker and port1 to the renderer.
+  // Once both ends are wired, main is no longer in the data path — bulk payloads
+  // flow worker <-> renderer directly over the port pair.
+  //
+  // Ports must be attached to webContents.postMessage (event.sender.postMessage)
+  // — an ipcMain.handle return value cannot carry MessagePorts, so we fire a
+  // separate 'cad:port' IPC and just return `true` to resolve the renderer's
+  // awaited openCadPort() promise.
+  ipcMain.handle('cad:openPort', (event) => {
+    const child = utilityProcess.fork(join(__dirname, 'worker.js'), [], {
+      stdio: 'inherit'
+    })
+    child.on('spawn', () => console.log('[cad] worker spawned, pid=', child.pid))
+    child.on('exit', (code) => console.log('[cad] worker exit code=', code))
+    const { port1, port2 } = new MessageChannelMain()
+    child.postMessage({ type: 'init' }, [port2])
+    event.sender.postMessage('cad:port', null, [port1])
+    return true
+  })
 
   createWindow()
 
