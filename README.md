@@ -6,78 +6,128 @@ A minimal Electron + `electron-vite` POC that demonstrates the three Electron pr
 - a **renderer** process (Chromium) for the UI, bridged by a **preload** script, and
 - an out-of-process **utility** process (Node-only) used to simulate a heavy, potentially-blocking native call (e.g. a SolidWorks / CAD COM round-trip) without stalling either the UI or the main process.
 
-It also wires up `electron-updater` against a `generic` provider so unsigned local builds can still auto-update for POC/demo purposes.
+It also wires up `electron-builder` + `electron-updater` against a `generic` provider so unsigned local builds can still be packaged and auto-updated for POC/demo purposes.
 
-## Architecture
+## Architecture & Reliability
+
+### Process model
+
+Four logical units, three OS processes (preload shares the renderer process but runs in an isolated world):
 
 ```mermaid
 flowchart LR
-    subgraph Renderer["Renderer process (Chromium)"]
-        UI["index.html + renderer.js<br/>Ping / Send IPC / Run CAD call buttons"]
-        WindowMsg(["window 'message' listener<br/>(receives 'cad:port')"])
-    end
+    Renderer["Renderer (Chromium)<br/>index.html + renderer.js"]
+    Preload["Preload (isolated world)<br/>contextBridge: window.api"]
+    Main["Main (Node + Electron)<br/>app lifecycle, BrowserWindow,<br/>ipcMain handlers"]
+    Worker["Utility process (Node)<br/>worker.js — simulated CAD call"]
 
-    subgraph Preload["Preload (isolated world)"]
-        Bridge["contextBridge<br/>window.api.ping<br/>window.api.openCadPort"]
-        Relay["ipcRenderer.on('cad:port')<br/>→ window.postMessage"]
-    end
-
-    subgraph Main["Main process (Node + Electron)"]
-        App["app lifecycle<br/>BrowserWindow"]
-        Ipc["ipcMain.handle<br/>'ping'  |  'cad:openPort'"]
-        Fork["utilityProcess.fork(worker.js)<br/>+ MessageChannelMain"]
-        Updater["electron-updater<br/>(generic provider)"]
-    end
-
-    subgraph Worker["Utility process (Node only)"]
-        W["worker.js<br/>process.parentPort<br/>simulated CAD call"]
-    end
-
-    UI -- "window.api.ping(msg)" --> Bridge
-    Bridge -- "ipcRenderer.invoke('ping')" --> Ipc
-    Ipc -- "reply" --> Bridge --> UI
-
-    UI -- "window.api.openCadPort()" --> Bridge
-    Bridge -- "ipcRenderer.invoke('cad:openPort')" --> Ipc
-    Ipc --> Fork
-    Fork -- "postMessage({type:'init'}, [port2])" --> W
-    Fork -- "webContents.postMessage('cad:port', [port1])" --> Relay
-    Relay -- "window.postMessage('cad:port', [port1])" --> WindowMsg
-    WindowMsg <== "MessageChannel (direct, main not in data path)" ==> W
-
-    App --> Ipc
-    Updater -.-> App
+    Renderer <-- "window.api.*" --> Preload
+    Preload <-- "ipcRenderer ⇄ ipcMain" --> Main
+    Main -- "utilityProcess.fork + port2" --> Worker
+    Renderer <== "MessageChannel (port1 ⇄ port2)<br/>main not in data path" ==> Worker
 ```
 
-### How a request flows
+Reliability goal: a slow or blocking native call in the worker must not freeze the UI **or** the main process. The main process forks the worker and brokers the initial `MessagePort` handoff — after that, renderer and worker talk directly over a `MessageChannel`.
 
-**Classic request/response IPC (`Ping` / `Send IPC` buttons)**
+### Classic request/response IPC (`Ping` / `Send IPC` buttons)
 
 1. Renderer calls `window.api.ping(msg)` exposed by the preload.
 2. Preload forwards it as `ipcRenderer.invoke('ping', msg)`.
 3. Main handles it via `ipcMain.handle('ping', …)` and returns a plain object, which resolves the renderer's promise.
 
-**Out-of-process CAD call (`Run CAD call` button)**
+### CAD port handoff (`Run CAD call` button)
 
-This is the interesting part. The goal is to keep the main process out of the data path so a slow/blocking native call in the worker cannot freeze the UI or the app lifecycle.
+The tricky part: we need to give the renderer a live `MessagePort` connected to the worker, but neither `ipcMain.handle` return values nor `contextBridge` proxies can carry a `MessagePort`. The sequence below shows the workaround.
 
-1. Renderer calls `window.api.openCadPort()`. Before awaiting it, it registers a `window.addEventListener('message', …)` listener so it won't miss the port.
-2. Main handles `cad:openPort`:
-   - `utilityProcess.fork('worker.js')` spawns a Node-only child process.
-   - `new MessageChannelMain()` creates a `{ port1, port2 }` pair.
-   - `port2` is sent to the worker via `child.postMessage({ type: 'init' }, [port2])`.
-   - `port1` is sent to the renderer via `event.sender.postMessage('cad:port', null, [port1])`. (An `ipcMain.handle` return value cannot carry `MessagePort`s, so we use a separate fire-and-forget IPC and just resolve the invoke with `true`.)
-3. The preload receives `cad:port` on `ipcRenderer` and re-transfers the port to the page with `window.postMessage('cad:port', '*', ipcEvent.ports)`. A live `MessagePort` cannot be proxied through `contextBridge` — its `onmessage`/`postMessage`/`start` don't survive the isolated-world boundary — so `window.postMessage` (which natively handles transferables) is used instead.
-4. Renderer's window `message` listener picks up the port, calls `port.start()` (transferred ports arrive paused), and `port.postMessage({ type: 'cadCall' })`.
-5. Worker receives the call on its port, simulates work (`setTimeout` + a 16 MiB `ArrayBuffer`), and posts the result back. Bytes flow **worker → renderer** directly over the `MessageChannel`; main is no longer involved.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as Renderer
+    participant P as Preload
+    participant M as Main
+    participant W as Utility (worker.js)
 
-> Gotcha worth remembering: `MessagePortMain.postMessage`'s transfer list only accepts `MessagePortMain` instances — unlike DOM `MessagePort` in the renderer, `ArrayBuffer`s can't be zero-copy transferred from the utility process. Structured clone still ships the bytes across the process boundary straight to the renderer's port without hopping through main-process JS.
+    R->>R: addEventListener('message', handlePortArrival)
+    R->>P: window.api.openCadPort()
+    P->>M: ipcRenderer.invoke('cad:openPort')
+    M->>W: utilityProcess.fork(worker.js)
+    M->>M: new MessageChannelMain() → {port1, port2}
+    M->>W: child.postMessage({type:'init'}, [port2])
+    M->>P: event.sender.postMessage('cad:port', null, [port1])
+    M-->>P: invoke resolves with true
+    P->>R: window.postMessage('cad:port', '*', [port1])
+    R->>R: port.start(); port.postMessage({type:'cadCall'})
+    R->>W: via MessageChannel (direct)
+    W->>W: simulate 500 ms work + 16 MiB buffer
+    W->>R: port.postMessage({type:'cadResult', buf}) (direct)
+```
 
-### Auto-update
+Why the detours:
 
-`electron-updater` is configured as a `generic` provider pointing at `http://127.0.0.1:8080/` (see `electron-builder.yml` and `dev-app-update.yml`). Integrity is verified against the SHA512 in `latest.yml`, so unsigned builds still update correctly for a local POC. On `update-downloaded`, the app calls `autoUpdater.quitAndInstall()`.
+- **`MessagePort` can't ride an `invoke` return value** — so main uses a separate fire-and-forget `cad:port` IPC via `webContents.postMessage` and just resolves the original `invoke` with `true`.
+- **`contextBridge` can't proxy a live `MessagePort`** — its `onmessage`/`postMessage`/`start` don't survive the isolated-world boundary. The preload re-transfers the port into the page using `window.postMessage`, which natively handles transferables.
+- **Transferred ports arrive paused** — the renderer must call `port.start()` before `onmessage` fires.
 
-To test locally, serve the contents of `dist/` from any static server on port 8080 (for example `npx http-server dist -p 8080`), bump `version` in `package.json`, rebuild, and launch a previously installed version.
+> Gotcha: `MessagePortMain.postMessage`'s transfer list only accepts `MessagePortMain` instances — unlike DOM `MessagePort` in the renderer, `ArrayBuffer`s can't be zero-copy transferred from the utility process. Structured clone still ships the bytes across the process boundary straight to the renderer's port without hopping through main-process JS.
+
+## Delivery & Enterprise Packaging
+
+### Build → publish → auto-update pipeline
+
+```mermaid
+flowchart LR
+    subgraph Source["Source"]
+        Src["src/ (main, preload, renderer, worker)"]
+        Vite["electron.vite.config.mjs"]
+        Bld["electron-builder.yml<br/>dev-app-update.yml"]
+    end
+
+    subgraph BuildStep["Build"]
+        EV["electron-vite build<br/>→ out/{main,preload,renderer}"]
+        EB["electron-builder<br/>NSIS / dmg / AppImage+snap+deb"]
+    end
+
+    subgraph Artifacts["dist/ artifacts"]
+        Setup["electron-demo-X.Y.Z-setup.exe"]
+        Latest["latest.yml<br/>(version + SHA512 + size)"]
+    end
+
+    Host["Static host<br/>http://127.0.0.1:8080/<br/>(generic provider)"]
+
+    subgraph Installed["Installed client"]
+        App["Running app<br/>(autoUpdater.checkForUpdatesAndNotify)"]
+    end
+
+    Src --> EV
+    Vite --> EV
+    EV --> EB
+    Bld --> EB
+    EB --> Setup
+    EB --> Latest
+    Setup --> Host
+    Latest --> Host
+
+    App -- "GET latest.yml" --> Host
+    Host -- "version + sha512" --> App
+    App -- "GET setup.exe if newer" --> Host
+    Host -- "installer bytes" --> App
+    App -- "verify sha512 → quitAndInstall()" --> App
+```
+
+### What's wired up
+
+- **`electron-vite`** declares two main-process entries — `src/main/index.js` and `src/main/worker.js` — alongside `preload` and `renderer`, so the utility worker is bundled as its own output next to `out/main/index.js`.
+- **`electron-builder`** packages per-platform installers (NSIS on Windows, dmg on macOS, AppImage/snap/deb on Linux) and emits a `latest.yml` manifest containing the version, filename, SHA512, and size.
+- **`electron-updater`** uses the `generic` provider pointed at `http://127.0.0.1:8080/`. Integrity is verified against the SHA512 in `latest.yml`, so unsigned builds still update correctly for a local POC. On `update-downloaded`, the app calls `autoUpdater.quitAndInstall()`.
+- **`asarUnpack: resources/**`** keeps native resources outside `app.asar` so anything that needs a real file path (future native add-ons, CAD SDK DLLs, etc.) works after install.
+
+### Testing auto-update locally
+
+1. `npm run build:win` (or `:mac` / `:linux`) — produces the installer + `latest.yml` in `dist/`.
+2. Install from that installer.
+3. Bump `version` in `package.json`, rebuild so `dist/` contains the new installer and an updated `latest.yml`.
+4. Serve `dist/` on port 8080, e.g. `npx http-server dist -p 8080`.
+5. Launch the previously installed app — it fetches `latest.yml`, downloads the new installer, verifies SHA512, and relaunches into the new version.
 
 ## Project layout
 
